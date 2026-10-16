@@ -1,6 +1,6 @@
 {
   "name": "agent-team-pm",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A herdr project-manager skill for teams of coding agents",
   "license": "MIT",
   "repository": {

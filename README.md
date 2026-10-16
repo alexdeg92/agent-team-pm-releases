@@ -10,9 +10,9 @@
 </p>
 <p align="center"><a href="#quick-start">Quick start</a> · <a href="#how-it-works">How it works</a> · <a href="#daily-use">Daily use</a> · <a href="#faq">FAQ</a> · <a href="https://github.com/alexdeg92/agent-team-pm-releases/releases">Releases</a></p>
 
-![Agent Team PM demo: the real team board groups tasks by state and owner, followed by a roster with Claude, Codex and Cursor roles.](https://raw.githubusercontent.com/alexdeg92/agent-team-pm-releases/main/docs/readme/team-board.png)
+![Real herdr interface: a shared task board and team roster in two panes of an isolated example workspace.](https://raw.githubusercontent.com/alexdeg92/agent-team-pm-releases/main/docs/readme/team-board.png)
 
-*Captured output from the included CLI using synthetic demo data. No live agents, private projects or personal information are shown.*
+*The actual herdr terminal interface, captured with synthetic board data in an isolated workspace. No live agents or private projects are shown.*
 
 ## A team with a shared plan
 
@@ -83,7 +83,7 @@ Install herdr and authenticate the coding-agent CLIs separately.
 <summary><strong>curl · versioned package with checksum verification</strong></summary>
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/alexdeg92/agent-team-pm-releases/v0.1.1/install.sh -o /tmp/agent-team-pm-install.sh
+curl -fsSL https://raw.githubusercontent.com/alexdeg92/agent-team-pm-releases/v0.1.2/install.sh -o /tmp/agent-team-pm-install.sh
 bash /tmp/agent-team-pm-install.sh install
 ```
 
@@ -95,7 +95,7 @@ versioned GitHub release tarball, verifies its SHA256 and runs the same installe
 <summary><strong>Tagged GitHub installation</strong></summary>
 
 ```sh
-npx github:alexdeg92/agent-team-pm-releases#v0.1.1 install
+npx github:alexdeg92/agent-team-pm-releases#v0.1.2 install
 ```
 
 Release assets also include an npm tarball and its SHA256 file.
@@ -192,12 +192,42 @@ Use `agent-team-pm install --dir <skills dir>` for another skills directory.
 The installer detects changed or added files and prints a diff summary before refusing
 to replace a modified copy. Review those changes before using `install --force`.
 
-## Works with Agent Office
+## Give your team an office
 
-The member registry records stable member ids and spawner lineage. Dashboards such as
-[Agent Office](https://github.com/alexdeg92/agent-office-oss) can read those records and
-join them with herdr presence. A dashboard is optional; the PM, board and reports work
-from the terminal. See [the member and lineage contract](SKILL.md#team-members-and-lineage-for-dashboards).
+Pair this skill with **[Agent Office](https://github.com/alexdeg92/agent-office-oss)**
+for a more visual and playful way to follow the team. Agents get desks and characters
+in an animated office: see who is working, thinking, waiting or taking a break,
+then explore their sessions and the tools supported by the connected runtime.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/alexdeg92/agent-office-oss/main/docs/readme/hero-dark.webp">
+  <img src="https://raw.githubusercontent.com/alexdeg92/agent-office-oss/main/docs/readme/hero-light.webp" width="1440" alt="Agent Office's real demo interface: an animated office with agents at their desks and a roster showing their activity.">
+</picture>
+
+*Real Agent Office screenshot with synthetic demo data. Agent Office is a separate,
+optional companion, not the interface installed by this skill.*
+
+- **The PM coordinates; the office makes the team visible.** This skill handles briefs,
+  ownership, board state and review. Agent Office provides the animated overview,
+  session views and runtime-specific interaction.
+- **Keep a team together.** Point Agent Office at the shared team store; stable member
+  ids and lineage connect the roster to herdr presence.
+- **Make it yours.** Choose characters, colors and accessories for the team.
+
+Agent Office requires **Node.js 24+** and its own setup. From your project root,
+after installing this skill:
+
+```sh
+npm i -g @alexdeg92/agent-office
+agent-office setup
+AO_TEAM_STORE_ROOT="$(team root)" agent-office start
+```
+
+Complete the Agent Office setup wizard and connect your runtimes. Available interaction
+follows each adapter's capabilities: its current Claude Code and Codex adapters provide
+read-only session views; chat and control depend on a runtime that supports them.
+See the [Agent Office guide](https://github.com/alexdeg92/agent-office-oss#quick-start)
+and this skill's [member and lineage contract](SKILL.md#team-members-and-lineage-for-dashboards).
 
 ## FAQ
 
