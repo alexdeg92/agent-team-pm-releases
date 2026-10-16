@@ -1,6 +1,6 @@
 {
   "name": "agent-team-pm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A herdr project-manager skill for teams of coding agents",
   "license": "MIT",
   "repository": {
@@ -20,7 +20,10 @@
     "references/",
     "templates/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/readme/"
   ],
-  "private": true
+  "publishConfig": {
+    "access": "public"
+  }
 }
