@@ -1,0 +1,26 @@
+{
+  "name": "agent-team-pm",
+  "version": "0.1.0",
+  "description": "A herdr project-manager skill for teams of coding agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexdeg92/agent-team-pm-releases.git"
+  },
+  "bin": {
+    "agent-team-pm": "bin/agent-team-pm.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "SKILL.md",
+    "scripts/",
+    "references/",
+    "templates/",
+    "README.md",
+    "LICENSE"
+  ],
+  "private": true
+}

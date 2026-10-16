@@ -1,0 +1,11 @@
+# class<TAB>kind (or *)<TAB>case-insensitive ERE matched against the agent's recent pane text (lines joined)
+# Add a line to support a new agent CLI's wording; no code change needed.
+provider	*	at capacity|overloaded|server is busy|temporarily unavailable|service unavailable|\b5(02|03|29)\b
+provider	*	rate.?limit|too many requests|\b429\b|quota (exceeded|reached)|usage limit|weekly limit|limit reached
+auth	*	please (log ?in|sign in|authenticate)|not logged in|unauthori[sz]ed|token (expired|invalid)|re-?authenticate
+crash	*	panic:|segmentation fault|unhandled (exception|rejection)|fatal error|killed
+update	*	update available|updated to|restart (codex|the cli) to|new version installed
+question	*	\?\s*(\(y/n\)|\[y/n\])|would you like me to|should i (proceed|continue)|do you want me to|which (option|approach) (do|would) you
+context	*	context (window|limit) (exceeded|full)|conversation is too long|compacting
+busy	*	queued follow-up|working \(|esc to interrupt|thinking…|running…
+policy	*	can.t be shown|we take extra care with some cybersecurity|content policy|violates (our|the) (usage )?polic|i can.t help with that request

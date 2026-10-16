@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""team: a shared task board and inboxes for an agent swarm. Runtime-agnostic: any agent CLI that can run a shell
+command can use it. All state lives in plain files under $TEAM_DIR (default ~/.local/share/agent-team/default),
+one JSON file per task and one JSONL inbox per agent. Default location: <git common dir>/team, so every worktree
+of the same repo shares one board without configuration. Every write takes a lock, so claims are atomic across agents.
+
+  team task add "<title>" [--brief PATH] [--owner NAME] [--needs-review critic,security] [--after T-0003] [--prio 1-3]
+  team task list [--state open|claimed|working|review|done|blocked] [--mine]
+  team task show T-0001
+  team task claim [T-0001]            # no id: claims the highest-priority open task whose dependencies are done
+  team task set T-0001 <state> ["note"] [--commit HASH] [--report PATH]
+  team task review T-0001 <reviewer> go|no-go "<note>" [--report PATH]
+  team msg <to|all> "<text>"            # durable inbox write + best-effort herdr nudge
+  team inbox [--all]                    # unread messages for me (marks them read)
+  team board                            # one-screen overview for humans and the PM
+  team root                             # where this board lives
+  team member register <name> [--role pm|builder|reviewer|designer|researcher] [--spawned-by NAME] [--runtime KIND]
+  team member list [--json]             # stable member records (id, herdr pane/session, spawnedBy) for dashboards
+  team github enable --repo OWNER/NAME [--base BRANCH]   # mirror: task→issue, review→PR, verdict→PR comment, done→close
+  team github sync [--all]              # backfill issues/PRs for existing tasks
+  team spawn <name> --kind <claude|codex|cursor|...> --pane <ID> [--role R] [-- agent args]
+                                        # herdr agent start + member record with spawnedBy = me (lineage for UIs)
+
+Identity: $TEAM_AGENT, else the herdr name of $HERDR_PANE_ID, else $USER.
+State moves: open → claimed → working → review → done; any → blocked → (open|working). `review` notifies the
+task's reviewers; a task becomes `done` only when every required reviewer said go (or the PM forces it with --force).
+"""
+import json, os, sys, time, fcntl, subprocess, argparse, glob
+
+def _root():
+    """$TEAM_DIR, else <git common dir>/team (shared by every worktree of the repo), else ~/.local/share/agent-team/default."""
+    if os.environ.get('TEAM_DIR'):
+        return os.path.expanduser(os.environ['TEAM_DIR'])
+    try:
+        g = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], capture_output=True, text=True, timeout=5).stdout.strip()
+        if g:
+            return os.path.join(g, 'team')
+    except Exception:
+        pass
+    return os.path.expanduser('~/.local/share/agent-team/default')
+ROOT = _root()
+TASKS, INBOX, MEMBERS = os.path.join(ROOT, 'tasks'), os.path.join(ROOT, 'inbox'), os.path.join(ROOT, 'members')
+STATES = ['open', 'claimed', 'working', 'review', 'done', 'blocked']
+for d in (TASKS, INBOX, MEMBERS):
+    os.makedirs(d, exist_ok=True)
+
+def now(): return time.strftime('%Y-%m-%dT%H:%M:%S')
+
+class Lock:
+    def __enter__(self):
+        self.f = open(os.path.join(ROOT, '.lock'), 'w'); fcntl.flock(self.f, fcntl.LOCK_EX); return self
+    def __exit__(self, *a):
+        fcntl.flock(self.f, fcntl.LOCK_UN); self.f.close()
+
+def me():
+    if os.environ.get('TEAM_AGENT'):
+        return os.environ['TEAM_AGENT']
+    pane = os.environ.get('HERDR_PANE_ID')
+    if pane:
+        try:
+            for a in json.loads(subprocess.run(['herdr', 'agent', 'list'], capture_output=True, text=True, timeout=10).stdout)['result']['agents']:
+                if a.get('pane_id') == pane and a.get('name'):
+                    return a['name']
+        except Exception:
+            pass
+    return os.environ.get('USER', 'unknown')
+
+def path(tid): return os.path.join(TASKS, f'{tid}.json')
+def load(tid):
+    with open(path(tid)) as f: return json.load(f)
+def save(t):
+    tmp = path(t['id']) + '.tmp'
+    with open(tmp, 'w') as f: json.dump(t, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, path(t['id']))
+def all_tasks():
+    out = []
+    for p in sorted(glob.glob(os.path.join(TASKS, 'T-*.json'))):
+        try:
+            with open(p) as f: out.append(json.load(f))
+        except Exception:
+            pass
+    return out
+
+def nudge(to, text):
+    """Best effort: the inbox is the source of truth; the herdr prompt only tells the agent to look.
+    TEAM_NO_NUDGE=1 (tests, dry runs) never touches herdr."""
+    if os.environ.get('TEAM_NO_NUDGE') == '1':
+        return
+    try:
+        subprocess.run(['herdr', 'agent', 'prompt', to, text], capture_output=True, text=True, timeout=15)
+    except Exception:
+        pass
+
+def deliver(to, frm, text, task=None):
+    rec = {'ts': now(), 'from': frm, 'to': to, 'text': text, 'task': task}
+    with open(os.path.join(INBOX, f'{to}.jsonl'), 'a') as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+    nudge(to, f'[team] message from {frm}{" on " + task if task else ""}: run `team inbox` to read it.')
+
+def history(t, who, what):
+    t.setdefault('history', []).append({'ts': now(), 'by': who, 'event': what})
+    t['updated'] = now()
+
+def _herdr_agent(name):
+    """The herdr record for an agent name: pane id plus the runtime session reference herdr observed. Stable ids only."""
+    try:
+        for a in json.loads(subprocess.run(['herdr', 'agent', 'list'], capture_output=True, text=True, timeout=10).stdout)['result']['agents']:
+            if a.get('name') == name:
+                sess = a.get('agent_session') or {}
+                return {'pane': a.get('pane_id'), 'runtime': a.get('agent') or sess.get('agent'),
+                        'session': {'source': sess.get('source'), 'kind': sess.get('kind'), 'value': sess.get('value')} if sess.get('value') else None}
+    except Exception:
+        pass
+    return {}
+
+def mpath(name): return os.path.join(MEMBERS, f'{name}.json')
+def load_member(name):
+    try:
+        with open(mpath(name)) as f: return json.load(f)
+    except Exception:
+        return None
+def save_member(m):
+    tmp = mpath(m['name']) + '.tmp'
+    with open(tmp, 'w') as f: json.dump(m, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, mpath(m['name']))
+
+def register(name, role=None, spawned_by=None, runtime=None):
+    """Create or refresh a member record. `id` is minted once and never changes; spawnedBy holds the spawner's id."""
+    import uuid
+    with Lock():
+        m = load_member(name) or {'id': 'member:' + uuid.uuid4().hex, 'name': name, 'registered': now()}
+        h = _herdr_agent(name)
+        if role: m['role'] = role
+        if runtime or h.get('runtime'): m['runtime'] = runtime or h.get('runtime')
+        if h.get('pane'): m['herdrPane'] = h['pane']
+        if h.get('session'): m['session'] = h['session']
+        if spawned_by:
+            parent = load_member(spawned_by)
+            if not parent:
+                parent = {'id': 'member:' + uuid.uuid4().hex, 'name': spawned_by, 'registered': now()}
+                save_member(parent)
+            m['spawnedBy'] = parent['id']
+        m['updated'] = now()
+        save_member(m)
+        return m
+
+def cmd_member(a):
+    if a.op == 'register':
+        m = register(a.name, a.role, a.spawned_by, a.runtime); print(json.dumps(m, ensure_ascii=False))
+    elif a.op == 'list':
+        ms = []
+        for p in sorted(glob.glob(os.path.join(MEMBERS, '*.json'))):
+            try:
+                with open(p) as f: ms.append(json.load(f))
+            except Exception:
+                pass
+        if a.json:
+            print(json.dumps({'version': 1, 'members': ms}, ensure_ascii=False))
+        else:
+            ids = {m['id']: m['name'] for m in ms}
+            for m in ms:
+                print(f"{m['name']:16} {m.get('role','-'):10} {m.get('runtime','-'):8} pane={m.get('herdrPane','-'):8} spawnedBy={ids.get(m.get('spawnedBy'),'-')}")
+
+def cmd_spawn(a):
+    args = ['herdr', 'agent', 'start', a.name, '--kind', a.kind, '--pane', a.pane] + (['--'] + a.agent_args if a.agent_args else [])
+    r = subprocess.run(args, capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(r.stderr.strip() or r.stdout.strip() or 'herdr agent start failed')
+    m = register(a.name, a.role, me(), a.kind)
+    print(json.dumps(m, ensure_ascii=False))
+
+# ---- GitHub mirror (optional): each task ↔ an issue, each reviewed branch ↔ a PR, verdicts ↔ PR comments ----
+# Enable once per board: `team github enable --repo OWNER/NAME --base BRANCH`. Best effort: a GitHub failure never
+# fails a team command. TEAM_NO_GITHUB=1 (tests, dry runs) never calls gh.
+def _ghcfg():
+    try:
+        with open(os.path.join(ROOT, 'github.json')) as f: c = json.load(f)
+        return c if c.get('enabled') and os.environ.get('TEAM_NO_GITHUB') != '1' else None
+    except Exception:
+        return None
+
+def _gh(args, timeout=60):
+    c = _ghcfg()
+    if not c: return None
+    try:
+        r = subprocess.run(['gh'] + args + ['--repo', c['repo']], capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+def gh_issue(t):
+    if not _ghcfg() or t.get('issue'): return
+    body = f"Board task **{t['id']}** (agent-team-pm).\n\n- Owner: {t.get('owner') or '-'}\n- Priority: p{t.get('prio', 2)}\n" + (f"- Brief: `{t['brief']}`\n" if t.get('brief') else '')
+    out = _gh(['issue', 'create', '--title', f"{t['id']}: {t['title']}", '--body', body, '--label', _ghcfg().get('label', 'team')])
+    if out and '/issues/' in out:
+        t['issue'] = int(out.rstrip('/').split('/')[-1])
+
+def _branch_of(commit):
+    try:
+        # Prefer a branch whose tip IS the commit; fall back to branches containing it (newest work wins).
+        out = subprocess.run(['git', 'branch', '--format=%(refname:short)', '--points-at', commit], capture_output=True, text=True, timeout=20).stdout.split() \
+            or subprocess.run(['git', 'branch', '--format=%(refname:short)', '--sort=-committerdate', '--contains', commit], capture_output=True, text=True, timeout=20).stdout.split()
+        base = (_ghcfg() or {}).get('base', 'main')
+        cands = [b for b in out if b not in (base, 'main', 'master') and not b.startswith('deploy-')]
+        return cands[0] if cands else None
+    except Exception:
+        return None
+
+def gh_pr(t):
+    c = _ghcfg()
+    if not c or not t.get('commit'): return
+    if t.get('pr'):
+        _gh(['pr', 'comment', str(t['pr']), '--body', f"New review round at `{t['commit'][:10]}`" + (f" · report `{t['report']}`" if t.get('report') else '')]); return
+    br = t.get('branch') or _branch_of(t['commit'])
+    if not br: return
+    subprocess.run(['git', 'push', '-q', 'origin', f'{br}:{br}'], capture_output=True, text=True, timeout=120)
+    body = (f"Closes #{t['issue']}\n\n" if t.get('issue') else '') + f"Board task **{t['id']}** · commit `{t['commit'][:10]}`" + (f" · report `{t['report']}`" if t.get('report') else '') + "\n\nReviewer verdicts are posted below as comments."
+    out = _gh(['pr', 'create', '--base', c.get('base', 'main'), '--head', br, '--title', f"{t['id']}: {t['title']}", '--body', body])
+    if out and '/pull/' in out:
+        t['pr'], t['branch'] = int(out.rstrip('/').split('/')[-1]), br
+
+def gh_comment(t, text):
+    tgt = ['pr', 'comment', str(t['pr'])] if t.get('pr') else (['issue', 'comment', str(t['issue'])] if t.get('issue') else None)
+    if tgt: _gh(tgt + ['--body', text])
+
+def gh_done(t, note):
+    if t.get('issue'): _gh(['issue', 'close', str(t['issue']), '--comment', f"Done: {note or t['state']}"])
+
+def cmd_github(a):
+    if a.op == 'enable':
+        with open(os.path.join(ROOT, 'github.json'), 'w') as f: json.dump({'enabled': True, 'repo': a.repo, 'base': a.base, 'label': a.label}, f)
+        subprocess.run(['gh', 'label', 'create', a.label, '--repo', a.repo, '--color', '5F5FF7', '--force'], capture_output=True)
+        print(f'GitHub mirror on: {a.repo} (base {a.base}, label {a.label})')
+    elif a.op == 'sync':
+        n_i = n_p = 0
+        for t in all_tasks():
+            if t['state'] == 'done' and not a.all: continue
+            had_i, had_p = t.get('issue'), t.get('pr')
+            gh_issue(t)
+            if t['state'] == 'review': gh_pr(t)
+            if t.get('issue') != had_i or t.get('pr') != had_p:
+                with Lock(): save(t)
+                n_i += t.get('issue') != had_i; n_p += t.get('pr') != had_p
+        print(f'synced: {n_i} issues, {n_p} PRs')
+
+def cmd_task(a):
+    who = me()
+    with Lock():
+        if a.op == 'add':
+            n = max([int(t['id'][2:]) for t in all_tasks()] + [0]) + 1
+            t = {'id': f'T-{n:04d}', 'title': a.title, 'state': 'open', 'owner': a.owner, 'prio': a.prio,
+                 'brief': a.brief, 'after': [x for x in (a.after or '').split(',') if x],
+                 'reviewers': {r: None for r in (a.needs_review or '').split(',') if r},
+                 'created_by': who, 'created': now(), 'commit': None, 'report': None}
+            if a.owner: t['state'] = 'claimed'
+            history(t, who, 'created' + (f' for {a.owner}' if a.owner else '')); gh_issue(t); save(t)
+            if a.owner and a.owner != who: deliver(a.owner, who, f"assigned {t['id']}: {a.title}" + (f" (brief: {a.brief})" if a.brief else ''), t['id'])
+            print(t['id']); return
+        if a.op == 'list':
+            for t in all_tasks():
+                if a.state and t['state'] != a.state: continue
+                if a.mine and t.get('owner') != who: continue
+                print(f"{t['id']}  {t['state']:8} p{t.get('prio', 2)}  {t.get('owner') or '-':15} {t['title']}")
+            return
+        if a.op == 'show':
+            print(json.dumps(load(a.id), indent=1, ensure_ascii=False)); return
+        if a.op == 'claim':
+            done = {t['id'] for t in all_tasks() if t['state'] == 'done'}
+            if a.id:
+                t = load(a.id)
+                if t['state'] != 'open': sys.exit(f"{a.id} is {t['state']} (owner {t.get('owner')}); not claimable")
+            else:
+                cands = [t for t in all_tasks() if t['state'] == 'open' and set(t.get('after', [])) <= done]
+                if not cands: sys.exit('no open task is ready')
+                t = sorted(cands, key=lambda t: (t.get('prio', 2), t['id']))[0]
+            t['owner'], t['state'] = who, 'claimed'; history(t, who, 'claimed'); save(t)
+            print(f"{t['id']} claimed: {t['title']}" + (f"\nbrief: {t['brief']}" if t.get('brief') else '')); return
+        if a.op == 'set':
+            t = load(a.id)
+            if a.state not in STATES: sys.exit(f'state must be one of {STATES}')
+            if a.state == 'done' and any(v != 'go' for v in t.get('reviewers', {}).values()) and not a.force:
+                sys.exit(f"{a.id}: reviewers not all go {t['reviewers']}; use `task review` or --force (PM)")
+            t['state'] = a.state
+            if a.commit: t['commit'] = a.commit
+            if a.report: t['report'] = a.report
+            history(t, who, a.state + (f': {a.note}' if a.note else ''))
+            if a.state == 'review': gh_issue(t); gh_pr(t)
+            if a.state == 'done': gh_done(t, a.note)
+            save(t)
+            if a.state == 'review':
+                # A new review round only when the commit changed (or none was reviewed yet): re-setting the state must
+                # never wipe verdicts already given on the same commit.
+                reviewed = {x.get('commit') for x in t.get('reviews', [])}
+                if t.get('commit') in reviewed and all(v for v in t.get('reviewers', {}).values()):
+                    print(f"{a.id}: already reviewed at {t.get('commit')}; verdicts kept {t['reviewers']}"); return
+                for r in t.get('reviewers', {}): t['reviewers'][r] = None
+                save(t)
+                for r in t.get('reviewers', {}): deliver(r, who, f"review {t['id']} ({t['title']}): commit {t.get('commit')}, report {t.get('report')}. Reply with `team task review {t['id']} {r} go|no-go \"note\" --report PATH`.", t['id'])
+            if a.state in ('review', 'done', 'blocked') and t.get('created_by') and t['created_by'] != who:
+                deliver(t['created_by'], who, f"{t['id']} is {a.state}" + (f': {a.note}' if a.note else ''), t['id'])
+            print(f"{a.id} → {a.state}"); return
+        if a.op == 'review':
+            t = load(a.id)
+            if a.verdict not in ('go', 'no-go'): sys.exit('verdict must be go or no-go')
+            t.setdefault('reviewers', {})[a.reviewer] = a.verdict
+            t.setdefault('reviews', []).append({'ts': now(), 'by': a.reviewer, 'verdict': a.verdict, 'note': a.note, 'report': a.report, 'commit': t.get('commit')})
+            history(t, who, f'review {a.reviewer}: {a.verdict}'); save(t)
+            gh_comment(t, f"**{a.reviewer}**: {'✅ GO' if a.verdict == 'go' else '❌ NO-GO'} at `{(t.get('commit') or '')[:10]}`\n\n{a.note}" + (f"\n\nReport: `{a.report}`" if a.report else ''))
+            for to in {t.get('owner'), t.get('created_by')} - {None, who}:
+                deliver(to, who, f"{a.reviewer} says {a.verdict} on {t['id']}: {a.note}" + (f" ({a.report})" if a.report else ''), t['id'])
+            if t['reviewers'] and all(v == 'go' for v in t['reviewers'].values()):
+                print(f"{a.id}: all reviewers go, ready to merge")
+            return
+
+def cmd_msg(a):
+    who = me()
+    with Lock():
+        if a.to == 'all':
+            names = {os.path.basename(p)[:-6] for p in glob.glob(os.path.join(INBOX, '*.jsonl'))}
+            try:
+                names |= {x['name'] for x in json.loads(subprocess.run(['herdr', 'agent', 'list'], capture_output=True, text=True, timeout=10).stdout)['result']['agents'] if x.get('name')}
+            except Exception:
+                pass
+            for n in sorted(names - {who}): deliver(n, who, a.text)
+        else:
+            deliver(a.to, who, a.text)
+    print('sent')
+
+def cmd_inbox(a):
+    who = me(); p = os.path.join(INBOX, f'{who}.jsonl'); seen = p + '.read'
+    with Lock():
+        lines = open(p).read().splitlines() if os.path.exists(p) else []
+        start = 0 if a.all else int(open(seen).read() or 0) if os.path.exists(seen) else 0
+        for l in lines[start:]:
+            try: m = json.loads(l.replace('\x00', ''))
+            except ValueError:
+                if l.strip('\x00 \t'): print(f'(skipped an unreadable inbox line: {l[:60]!r})', file=sys.stderr)
+                continue
+            print(f"[{m['ts']}] {m['from']}{' · ' + m['task'] if m.get('task') else ''}: {m['text']}")
+        if not lines[start:]: print('(no new messages)')
+        with open(seen, 'w') as f: f.write(str(len(lines)))
+
+def cmd_board(a):
+    ts = all_tasks(); by = {s: [t for t in ts if t['state'] == s] for s in STATES}
+    for s in STATES:
+        if not by[s]: continue
+        print(f"== {s} ({len(by[s])})")
+        for t in by[s]:
+            rv = ' '.join(f"{k}:{v or '…'}" for k, v in (t.get('reviewers') or {}).items())
+            print(f"  {t['id']} p{t.get('prio', 2)} {t.get('owner') or '-':15} {t['title'][:70]}{'  [' + rv + ']' if rv else ''}")
+    unread = []
+    for p in glob.glob(os.path.join(INBOX, '*.jsonl')):
+        n = sum(1 for _ in open(p)); r = int(open(p + '.read').read() or 0) if os.path.exists(p + '.read') else 0
+        if n > r: unread.append(f"{os.path.basename(p)[:-6]}:{n - r}")
+    if unread: print('unread: ' + ' '.join(sorted(unread)))
+
+ap = argparse.ArgumentParser(prog='team'); sub = ap.add_subparsers(dest='cmd', required=True)
+tk = sub.add_parser('task'); tsub = tk.add_subparsers(dest='op', required=True)
+x = tsub.add_parser('add'); x.add_argument('title'); x.add_argument('--brief'); x.add_argument('--owner'); x.add_argument('--needs-review'); x.add_argument('--after'); x.add_argument('--prio', type=int, default=2)
+x = tsub.add_parser('list'); x.add_argument('--state'); x.add_argument('--mine', action='store_true')
+x = tsub.add_parser('show'); x.add_argument('id')
+x = tsub.add_parser('claim'); x.add_argument('id', nargs='?')
+x = tsub.add_parser('set'); x.add_argument('id'); x.add_argument('state'); x.add_argument('note', nargs='?'); x.add_argument('--commit'); x.add_argument('--report'); x.add_argument('--force', action='store_true')
+x = tsub.add_parser('review'); x.add_argument('id'); x.add_argument('reviewer'); x.add_argument('verdict'); x.add_argument('note', nargs='?', default=''); x.add_argument('--report')
+x = sub.add_parser('msg'); x.add_argument('to'); x.add_argument('text')
+x = sub.add_parser('inbox'); x.add_argument('--all', action='store_true')
+mb = sub.add_parser('member'); msub = mb.add_subparsers(dest='op', required=True)
+x = msub.add_parser('register'); x.add_argument('name'); x.add_argument('--role'); x.add_argument('--spawned-by'); x.add_argument('--runtime')
+x = msub.add_parser('list'); x.add_argument('--json', action='store_true')
+x = sub.add_parser('spawn'); x.add_argument('name'); x.add_argument('--kind', required=True); x.add_argument('--pane', required=True); x.add_argument('--role'); x.add_argument('agent_args', nargs=argparse.REMAINDER)
+gb = sub.add_parser('github'); gsub = gb.add_subparsers(dest='op', required=True)
+x = gsub.add_parser('enable'); x.add_argument('--repo', required=True); x.add_argument('--base', default='main'); x.add_argument('--label', default='team')
+x = gsub.add_parser('sync'); x.add_argument('--all', action='store_true')
+sub.add_parser('board')
+sub.add_parser('root')
+a = ap.parse_args()
+{'task': cmd_task, 'msg': cmd_msg, 'inbox': cmd_inbox, 'board': cmd_board, 'member': cmd_member, 'spawn': cmd_spawn, 'github': cmd_github, 'root': lambda a: print(ROOT)}[a.cmd](a)
