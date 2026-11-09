@@ -83,7 +83,7 @@ Install herdr and authenticate the coding-agent CLIs separately.
 <summary><strong>curl · versioned package with checksum verification</strong></summary>
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/alexdeg92/agent-team-pm-releases/v0.1.2/install.sh -o /tmp/agent-team-pm-install.sh
+curl -fsSL https://raw.githubusercontent.com/alexdeg92/agent-team-pm-releases/v0.1.3/install.sh -o /tmp/agent-team-pm-install.sh
 bash /tmp/agent-team-pm-install.sh install
 ```
 
@@ -95,7 +95,7 @@ versioned GitHub release tarball, verifies its SHA256 and runs the same installe
 <summary><strong>Tagged GitHub installation</strong></summary>
 
 ```sh
-npx github:alexdeg92/agent-team-pm-releases#v0.1.2 install
+npx github:alexdeg92/agent-team-pm-releases#v0.1.3 install
 ```
 
 Release assets also include an npm tarball and its SHA256 file.

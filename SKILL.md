@@ -22,13 +22,15 @@ Files in this skill:
 - `scripts/discover-agents.sh`: inventory of the agent CLIs on the machine;
 - `scripts/spawn-agent.sh`: starts a role-named agent in no-approval mode and records it as a team member (`--role`, stable id, `spawnedBy` = you);
 - `scripts/snapshot.sh`: gated, frozen snapshots for a test instance;
-- `scripts/prompt-agent.sh`: reliable prompt delivery (retries while blocked, resolves by title, confirms);
+- `scripts/prompt-agent.sh`: reliable prompt delivery (exact names first, warned title fallback, retries while blocked, confirms);
 - `scripts/team-watch.sh`: one watcher for the whole team (FINISHED, ERROR, STALLED, BLOCKED, GONE, STATUSFILE);
 - `scripts/run-exclusive.sh`: a machine-wide lock for heavy shared jobs (the full suite, deploys);
 - `scripts/team`: a shared task board and durable inboxes for the swarm (claim, review gate, `msg`, `inbox`, `board`);
 - `scripts/agent-usage.py`: per-agent token, model and effort audit, with flags;
 - `references/failure-modes.md` and `references/error-patterns.tsv`: the failure taxonomy and the per-CLI wording as data;
 - `references/agent-profiles.md`: strengths, weaknesses, allocation method and the calibration task;
+- `references/architecture.md`: the mandatory architecture, data type, frontend/backend separation and clean-repo rules;
+- `references/ci-release.md`: the mandatory CI, versioned release, release note and automated deploy rules;
 - `templates/BRIEF.md` and `templates/task-brief.md`.
 
 ## 0. Preconditions
@@ -61,6 +63,22 @@ Run `scripts/discover-agents.sh` (or `--json`). It lists every installed agent C
 
 Make the planning decisions yourself. Ask the user only about product direction (brand, scope, priorities) and anything that touches production.
 
+### Architecture, data and clean repo (mandatory, every project)
+Apply `references/architecture.md` to every project, even when the user does not ask; they expect clean architecture by default.
+- **Before the first builder:** write `docs/ARCHITECTURE.md` (layers, feature modules, canonical types, how each rule is enforced) and make the dependency rules a failing CI check. On an existing codebase that breaks the rules, record the target and a shrinking baseline; new and touched code follows the target.
+- **Separate logic:** the backend owns business rules, authorization, validation and persistence; the frontend presents and never decides money, permissions or state transitions. Entry points (routes, server actions, components) only parse, call one use case and map the result.
+- **Canonical data types:** one definition per concept, inputs parsed at the boundary, typed constrained tables, no float money, no queryable JSON, numbered tested migrations.
+- **Keep the repo clean:** delete what is replaced in the same phase, no dead code or stray files, one tool per job, docs updated with the code.
+- Paste the rules block from the reference into the shared brief and every builder brief. The critic reviews every branch against it; a violation is a NO-GO.
+
+### CI, versioned releases and release notes (mandatory, every project)
+Apply `references/ci-release.md` to every project, even when the user does not ask.
+- **Before the first feature:** one check command, run by CI on every pull request and required on `main`. No merging red, no direct pushes.
+- **Releases:** cut from `main` with an automatic version tag; the full suite must be green on the exact released commit.
+- **Release notes:** every user-visible pull request adds its own change note file, in the users' words and every UI language; CI fails without it, and the release gathers the notes.
+- **Deploys:** automated from the release, backup before migrations, health and smoke check after, automatic rollback.
+- Paste the rules block from the reference into the shared brief and every builder brief. The critic treats a violation as a NO-GO.
+
 ### Standing reviewers and researcher (every team past 3 builders)
 Staff two permanent, **read-only** roles. Assign each review to a different vendor from that branch's builder; this keeps the review independent.
 - **critic:** challenges every implementation for a more reliable or simpler design, and for architecture fit (canonical place, adapter boundaries, open vocabularies). It checks behaviour at 1→N scale and under failure (restart, partial write, upgrade, rollback), and whether the tests would fail on buggy code. Each finding must have evidence (file:line), a concrete better design, its cost and a proving test. It reviews every branch before merge, and audits the riskiest seams in between.
@@ -73,6 +91,8 @@ Start each one from its charter: `templates/critic-charter.md`, `templates/secur
 ## 3. Write the shared brief
 Create `docs/BRIEF.md` (or `design/BRIEF.md`) from `templates/BRIEF.md`. It is the single source of truth, and agents re-read it after a restart. It holds:
 - **Hard rules:** secrets, privacy, language, what nobody may touch, no commits (the PM does git).
+- **Architecture rules:** the block from `references/architecture.md`, and a pointer to `docs/ARCHITECTURE.md`.
+- **CI and release rules:** the block from `references/ci-release.md`, with the project's check command and change note path.
 - **Team roster:** agent name = role, tool, and the exact paths each agent owns.
 - **Reporting protocol:** the report file, then `scripts/prompt-agent.sh <actual-pm-name> "<agent>: <one line>. Report: <path>"`. Agents never address the user.
 - **Where we work:** the worktree and branch, and the test instance with its snapshot rule.
@@ -110,12 +130,14 @@ Start from `templates/task-brief.md`. A brief contains:
 - read the CLAUDE.md file, then the brief;
 - the agent's name and role;
 - the files it owns;
+- the architecture rules block (`references/architecture.md`) and where its work sits in `docs/ARCHITECTURE.md`;
+- the CI and release rules block (`references/ci-release.md`): the check command to run and where its change note goes;
 - the reporting protocol;
 - the task, as numbered deliverables;
 - how to verify it (tests, headless-browser screenshots at desktop and phone width in light and dark, composites for art);
 - what the report must contain (exact test counts and the tree state).
 
-Write the brief to `<reports>/<task>-brief.md` **inside the agent's worktree**, then send a short pointer with `scripts/prompt-agent.sh <name> "<text>"`. It retries while the agent is blocked or compacting, resolves the agent by pane title if its name was lost, and confirms delivery. Never fire a raw `herdr agent prompt` and assume it landed.
+Write the brief to `<reports>/<task>-brief.md` **inside the agent's worktree**, then send a short pointer with `scripts/prompt-agent.sh <name> "<text>"`. It resolves the exact herdr agent name first, then an exact pane id. Only when neither exists does it use a unique title match, with a warning; ambiguous title matches send nothing. It retries while the agent is blocked or compacting, resolving afresh on each attempt, and confirms the receiving pane. A stale title mentioning the PM must never override the PM's live name. Never fire a raw `herdr agent prompt` and assume it landed.
 
 **Never let the team stall.**
 - Keep exactly **one** `scripts/team-watch.sh` running in the background, with `STATUS_GLOB` set to the reports' `*.status.json`. Don't run one ad-hoc wait loop per task.
@@ -173,6 +195,7 @@ Run it on Linux at each phase boundary, when a provider window passes 60%, and w
   - cropped screenshots;
   - delegate bulk visual review to a reviewer agent;
   - start a fresh PM session from a handoff file at phase boundaries.
+- **Transfer the PM role when its own provider is nearly exhausted** (for example, 97% of the weekly allowance). Follow [the PM handoff procedure](references/pm-handoff.md): write `PM-HANDOFF.md` with the state, approved decisions and remaining chain including exact approved PR text; rename the outgoing PM, start another vendor under the same reporting name, and verify its first prompt and acknowledgement in the new pane. Keeping the reporting name preserves every teammate's route to the PM.
 
 ## 5d. Self-organizing swarm: board, inboxes, integrations
 The PM arbitrates; it doesn't hand-carry every message.

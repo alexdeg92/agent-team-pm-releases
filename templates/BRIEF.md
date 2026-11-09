@@ -34,6 +34,20 @@ Cross-area changes: ask the owner through pm. Contracts between areas live in `d
 - **Language for user-facing text:** <language>.
 - **Stay inside the files you own.**
 
+## Architecture rules (mandatory, see docs/ARCHITECTURE.md)
+- Feature modules, layered inside: domain, application, infrastructure, entry. Dependencies point inward; CI enforces it. Entry points only parse, call one use case and map the result.
+- Backend owns rules, authorization, validation and persistence. Frontend shows and interacts; it never decides money, permissions or state transitions.
+- One canonical type per concept, defined once. Parse every input at its boundary; no raw JSON or any. Frontend types come from the backend schema.
+- Money: minor units or decimal plus currency, never float. UTC instants, dates as dates. Plain UUID ids. Enums plus DB constraints for closed sets; editable seeded tables for business vocabularies.
+- Tables: NOT NULL, FKs, unique and check constraints, no queryable JSON, numbered and tested migrations, one source of truth.
+- Keep the repo clean: delete what you replace, no dead code, no stray files, one tool per job, docs updated in the same branch.
+
+
+## CI and release rules (mandatory, see references/ci-release.md)
+- Run `<check command>` before every report. CI must be green; no merging red, no direct pushes to main or the release branch.
+- Every user-visible change adds a change note in `<changes/>` in the same branch, in the users' words and every UI language. Internal changes are marked internal.
+- Releases are cut from main with an automatic version tag, the full suite green on that exact commit, and notes gathered from the change files.
+- Deploys are automated: backup before migrations, health and smoke check after, automatic rollback. No manual steps on the server.
 ## Decisions log
 - <date>: <decision> (PM, on <report>)
 

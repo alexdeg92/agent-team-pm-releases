@@ -1,8 +1,8 @@
 class AgentTeamPm < Formula
   desc "Project-manager skill for teams of coding agents in herdr"
   homepage "https://github.com/alexdeg92/agent-team-pm-releases"
-  url "https://registry.npmjs.org/agent-team-pm/-/agent-team-pm-0.1.2.tgz"
-  sha256 "6d84955609b7f8a4e7e562b681efa46e78e2fcc932dd01f195a22954488c046c"
+  url "https://registry.npmjs.org/agent-team-pm/-/agent-team-pm-0.1.3.tgz"
+  sha256 "66277b4a33062b12eb2e7054bdedced2a1b2927d74b57646a3454e8f2c0ef8ac"
 
   license "MIT"
 

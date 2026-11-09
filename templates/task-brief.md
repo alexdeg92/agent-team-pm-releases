@@ -12,6 +12,19 @@ Read first: <docs/contracts and the existing code this extends>. Start the repor
 - **Scale.** It works for 1…N of every plural thing (agents, users, runtimes, items, packs). Say what grows with N (time, bytes, requests) and where the next ceiling is.
 - **Open vocabularies.** External names are data, with a label registry and a fallback. Lists in the UI come from the module or registry, never hand-copied.
 
+## Architecture, data and clean repo (every task)
+Read `references/architecture.md` from the PM skill and the project's `docs/ARCHITECTURE.md` before writing code.
+- Put code in its feature module and layer; entry points only parse, call one use case and map the result. Dependencies point inward.
+- Business rules, authorization, validation and persistence live in the backend. The frontend never decides money, permissions or state transitions.
+- Reuse the canonical type for each concept; parse every input at its boundary. No float money, no queryable JSON, constraints and a tested migration for every schema change.
+- Delete what you replace, leave no dead code or stray files, add no second tool for a job that already has one, and update the docs in the same branch.
+- Report any rule you could not follow, with the reason. The critic treats violations as NO-GO.
+
+## CI and release notes (every task)
+- Run the project's check command before you report; report its result. Never merge or push to main yourself.
+- If users will notice the change, add a change note file in the same branch, written for them, in every UI language. Otherwise mark the note internal.
+- Add or update tests in CI for what you built; a change CI does not exercise is not done.
+
 ## Frontend layout (mandatory for any UI, design or frontend task)
 Read `references/frontend-layout.md` from the PM skill before you touch any layout. The project copy may be in docs/architecture/layout-frames.md.
 - **The document never scrolls.** Each page is a frame: fixed head, bar and foot rows, plus ONE scrolling body. Other scrollers are only for independent panes, with `overscroll-behavior: contain`.
